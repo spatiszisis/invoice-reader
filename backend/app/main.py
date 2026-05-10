@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
 LMSTUDIO_API_KEY = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
 EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "local-model")
+# Vision model loaded in LM Studio for scanned PDFs and image uploads.
+# Must be a multimodal model (e.g. Qwen2-VL, Phi-3-Vision, LLaVA).
+# Defaults to the same model as EXTRACTION_MODEL if not set separately.
+VISION_MODEL = os.environ.get("VISION_MODEL", EXTRACTION_MODEL)
 TIMEOUT_SECONDS = float(os.environ.get("LMSTUDIO_TIMEOUT_SECONDS", "300"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "20"))
@@ -63,6 +67,7 @@ def _build_extractor() -> InvoiceExtractor:
             base_url=LMSTUDIO_BASE_URL,
             api_key=LMSTUDIO_API_KEY,
             model=EXTRACTION_MODEL,
+            vision_model=VISION_MODEL,
             timeout_seconds=TIMEOUT_SECONDS,
         )
     )

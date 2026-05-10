@@ -96,6 +96,6 @@ class ExtractionResponse(BaseModel):
     """Wrapper returned by /extract — one per uploaded file."""
 
     filename: str
-    extraction_method: Literal["text", "ocr"]
+    extraction_method: Literal["text", "ocr", "vision"]
     invoice: Invoice
     warnings: list[str] = Field(default_factory=list)
