@@ -32,6 +32,8 @@ LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v
 LMSTUDIO_API_KEY = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
 EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "local-model")
 TIMEOUT_SECONDS = float(os.environ.get("LMSTUDIO_TIMEOUT_SECONDS", "300"))
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "10"))
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "20"))
 CORS_ORIGINS = [
@@ -64,6 +66,8 @@ def _build_extractor() -> InvoiceExtractor:
             api_key=LMSTUDIO_API_KEY,
             model=EXTRACTION_MODEL,
             timeout_seconds=TIMEOUT_SECONDS,
+            anthropic_api_key=ANTHROPIC_API_KEY,
+            claude_model=CLAUDE_MODEL,
         )
     )
 

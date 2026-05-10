@@ -1,25 +1,21 @@
-"""Invoice extractor (LM Studio / local LLM via OpenAI-compatible API).
+"""Invoice extractor — local LLM (text path) + Claude Vision (image path).
 
-Three paths, all converging on the same text-LLM step:
+Three paths, converging on structured JSON extraction:
 
-  PDF with text layer  → pdfplumber → text → LLM
-  PDF without text     → pdf2image  → OCR  → text → LLM
-  Image upload         → OCR        → text → LLM
+  PDF with text layer  → pdfplumber → text → local LLM
+  PDF without text     → pdf2image  → pages as images → Claude Vision
+  Image upload         → Claude Vision directly
 
-The LLM stage uses LM Studio's OpenAI-compatible server (default at
-http://localhost:1234/v1). LM Studio supports JSON Schema constrained
-output via the same `response_format` field as OpenAI's API — this is
-strictly better than "any valid JSON" mode because it forces the model
-to match our exact field names and types, which keeps small models from
-inventing fields or returning numbers as strings.
-
-Same OpenAI-compatible endpoint pattern works against any other tool
-(Ollama in OpenAI-compat mode, vLLM, llama.cpp's server, etc.) by just
-changing LMSTUDIO_BASE_URL.
+The text path uses LM Studio's OpenAI-compatible server with JSON Schema
+constrained output. The vision path sends base64-encoded images directly
+to Claude, bypassing Tesseract entirely — this eliminates Greek OCR errors
+and works on any language without installing extra Tesseract language packs.
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import re
@@ -27,30 +23,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import anthropic
 import pdfplumber
 from openai import APIConnectionError, OpenAI
 from pdf2image import convert_from_path
+from PIL import Image
 from pydantic import ValidationError
 
-from app.ocr import ocr_image_file, ocr_pdf_pages
-from app.prompt import SYSTEM_PROMPT, user_prompt_for_text
+from app.prompt import SYSTEM_PROMPT, USER_PROMPT_FOR_VISION, user_prompt_for_text
 from app.schema import ExtractionResponse, Invoice
 
 logger = logging.getLogger(__name__)
 
-# A page with fewer than this many characters of pdfplumber text is
-# treated as "no real text layer" — fall back to OCR.
 TEXT_SPARSITY_THRESHOLD_PER_PAGE = 50
-
-# DPI for rasterizing scanned PDFs before OCR. 300 is the Tesseract
-# sweet spot — higher gains little, lower starts dropping accuracy.
 RASTER_DPI = 300
-
-# Cap on pages we OCR per document. Multi-page invoices are normal;
-# multi-hundred-page "invoices" are almost always statements.
-MAX_OCR_PAGES = 10
+MAX_VISION_PAGES = 10
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
+
+# Max dimension for images sent to Claude. Larger images cost more tokens
+# without meaningful accuracy gains on invoice text.
+VISION_MAX_DIMENSION = 2000
 
 
 class ExtractionError(Exception):
@@ -60,27 +53,18 @@ class ExtractionError(Exception):
 @dataclass
 class ExtractorConfig:
     base_url: str = "http://localhost:1234/v1"
-    # LM Studio doesn't validate the API key, but the OpenAI SDK requires
-    # the param to exist. Any non-empty string works.
     api_key: str = "lm-studio"
-    # Model identifier — for LM Studio, this is whatever's loaded in the
-    # server, but the field is required by the API. The string is largely
-    # decorative; "local-model" is a common convention.
     model: str = "local-model"
     temperature: float = 0.1
-    # Generous timeout — local CPU inference can take 30–90s per request.
     timeout_seconds: float = 300.0
+    # Claude Vision config — required for scanned PDFs and image uploads.
+    anthropic_api_key: str = ""
+    claude_model: str = "claude-opus-4-7"
 
 
-# Build the JSON Schema once at import time. Pydantic v2's
-# `model_json_schema()` produces a draft-2020-12 schema; LM Studio /
-# OpenAI structured outputs accept a slightly trimmed subset. We strip
-# the title noise and force `additionalProperties: false` everywhere
-# (small models love to invent fields when given the chance).
 def _build_response_schema() -> dict[str, Any]:
     schema = Invoice.model_json_schema()
     _harden_schema(schema)
-    # Wrap in OpenAI's response_format envelope.
     return {
         "type": "json_schema",
         "json_schema": {
@@ -92,13 +76,6 @@ def _build_response_schema() -> dict[str, Any]:
 
 
 def _harden_schema(node: Any) -> None:
-    """Walk the schema and disallow extra fields, normalize for local servers.
-
-    LM Studio's grammar-constrained sampling enforces this strictly. Without
-    `additionalProperties: false`, a small model will sometimes emit
-    `"foo": "bar"` keys that don't exist in our Pydantic model, and the
-    sampler is happy to oblige.
-    """
     if isinstance(node, dict):
         if node.get("type") == "object" and "properties" in node:
             node.setdefault("additionalProperties", False)
@@ -119,10 +96,12 @@ class InvoiceExtractor:
             base_url=config.base_url,
             api_key=config.api_key,
             timeout=config.timeout_seconds,
-            # No retries: a connection error on a local server is a config
-            # problem, not a transient blip. Retrying just delays the error
-            # message the user needs to see.
             max_retries=0,
+        )
+        self._claude: anthropic.Anthropic | None = (
+            anthropic.Anthropic(api_key=config.anthropic_api_key)
+            if config.anthropic_api_key
+            else None
         )
 
     # -------------------------------------------------------------- public API
@@ -138,21 +117,16 @@ class InvoiceExtractor:
                 invoice = self._extract_from_text(text)
                 return self._response(original_filename, "text", invoice, warnings)
 
-            logger.info("PDF text layer sparse; routing through OCR: %s", original_filename)
-            text = self._ocr_pdf(file_path, warnings)
-            invoice = self._extract_from_text(text)
-            return self._response(original_filename, "ocr", invoice, warnings)
+            logger.info("PDF has no text layer; using vision path: %s", original_filename)
+            pages = self._rasterize_pdf(file_path, warnings)
+            invoice = self._extract_from_images(pages)
+            return self._response(original_filename, "vision", invoice, warnings)
 
         if suffix in IMAGE_SUFFIXES:
-            logger.info("Image upload; routing through OCR: %s", original_filename)
-            text = ocr_image_file(file_path)
-            if not text.strip():
-                raise ExtractionError(
-                    "OCR produced no text. The image may be too blurry, "
-                    "rotated 90°/180°, or contain no readable invoice."
-                )
-            invoice = self._extract_from_text(text)
-            return self._response(original_filename, "ocr", invoice, warnings)
+            logger.info("Image upload; using vision path: %s", original_filename)
+            img = Image.open(file_path)
+            invoice = self._extract_from_images([img])
+            return self._response(original_filename, "vision", invoice, warnings)
 
         raise ExtractionError(f"Unsupported file type: {suffix or '(none)'}")
 
@@ -171,25 +145,56 @@ class InvoiceExtractor:
             page_count = len(pdf.pages)
         return len(clean) / max(page_count, 1) >= TEXT_SPARSITY_THRESHOLD_PER_PAGE
 
-    # -------------------------------------------------------------- ocr path
+    # ----------------------------------------------------------- vision path
 
-    def _ocr_pdf(self, file_path: Path, warnings: list[str]) -> str:
+    def _rasterize_pdf(self, file_path: Path, warnings: list[str]) -> list[Image.Image]:
         pages = convert_from_path(str(file_path), dpi=RASTER_DPI)
-        if len(pages) > MAX_OCR_PAGES:
+        if len(pages) > MAX_VISION_PAGES:
             warnings.append(
                 f"Document has {len(pages)} pages; only the first "
-                f"{MAX_OCR_PAGES} were OCR'd."
+                f"{MAX_VISION_PAGES} were processed."
             )
-            pages = pages[:MAX_OCR_PAGES]
-        text = ocr_pdf_pages(pages)
-        if not text.strip():
-            raise ExtractionError(
-                "OCR produced no text from this scanned PDF. The pages "
-                "may be blank or too low quality."
-            )
-        return text
+            pages = pages[:MAX_VISION_PAGES]
+        return pages
 
-    # ------------------------------------------------------------ llm step
+    def _extract_from_images(self, pages: list[Image.Image]) -> Invoice:
+        if not self._claude:
+            raise ExtractionError(
+                "Claude Vision is required for scanned PDFs and image uploads, "
+                "but ANTHROPIC_API_KEY is not configured. Set it in your environment."
+            )
+
+        image_blocks: list[dict[str, Any]] = []
+        for page in pages:
+            resized = self._resize_for_vision(page)
+            buf = io.BytesIO()
+            resized.convert("RGB").save(buf, format="JPEG", quality=90)
+            b64 = base64.standard_b64encode(buf.getvalue()).decode()
+            image_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            })
+
+        image_blocks.append({"type": "text", "text": USER_PROMPT_FOR_VISION})
+
+        response = self._claude.messages.create(
+            model=self._config.claude_model,
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": image_blocks}],
+        )
+        raw = response.content[0].text.strip() if response.content else ""
+        return self._parse(raw)
+
+    @staticmethod
+    def _resize_for_vision(img: Image.Image) -> Image.Image:
+        w, h = img.size
+        if max(w, h) <= VISION_MAX_DIMENSION:
+            return img
+        scale = VISION_MAX_DIMENSION / max(w, h)
+        return img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    # ------------------------------------------------------------ llm step (text)
 
     def _extract_from_text(self, text: str) -> Invoice:
         try:
@@ -203,9 +208,6 @@ class InvoiceExtractor:
                 temperature=self._config.temperature,
             )
         except APIConnectionError as exc:
-            # Most common operational failure: LM Studio isn't running, or
-            # is bound to localhost-only and we're calling from a container.
-            # Surface a clear, actionable message instead of a stack trace.
             raise ExtractionError(
                 f"Could not reach the LLM server at {self._config.base_url}. "
                 f"Check that LM Studio is running with its server started "
@@ -239,7 +241,7 @@ class InvoiceExtractor:
     @staticmethod
     def _response(
         filename: str,
-        method: Literal["text", "ocr"],
+        method: Literal["text", "ocr", "vision"],
         invoice: Invoice,
         warnings: list[str],
     ) -> ExtractionResponse:
