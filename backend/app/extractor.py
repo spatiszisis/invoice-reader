@@ -58,11 +58,7 @@ class ExtractionError(Exception):
 class ExtractorConfig:
     base_url: str = "http://localhost:1234/v1"
     api_key: str = "lm-studio"
-    # Text model — used for PDFs with a readable text layer.
     model: str = "local-model"
-    # Vision model — used for scanned PDFs and image uploads.
-    # Set to the same value as `model` if your vision model handles text too.
-    vision_model: str = "local-model"
     temperature: float = 0.1
     timeout_seconds: float = 300.0
 
@@ -174,7 +170,7 @@ class InvoiceExtractor:
 
         try:
             response = self._client.chat.completions.create(
-                model=self._config.vision_model,
+                model=self._config.model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
@@ -190,10 +186,10 @@ class InvoiceExtractor:
                     "Vision model '%s' does not support images; falling back to OCR. "
                     "Load a vision-capable model (e.g. Qwen2-VL, LLaVA) and set "
                     "VISION_MODEL to use the direct vision path.",
-                    self._config.vision_model,
+                    self._config.model,
                 )
                 warnings.append(
-                    f"Vision model '{self._config.vision_model}' does not support images. "
+                    f"Vision model '{self._config.model}' does not support images. "
                     "Fell back to Tesseract OCR — load a vision-capable model for better accuracy."
                 )
                 return self._ocr_fallback(pages), "ocr"
