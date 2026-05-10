@@ -28,11 +28,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pdfplumber
-from openai import APIConnectionError, OpenAI
+from openai import APIConnectionError, BadRequestError, OpenAI
 from pdf2image import convert_from_path
 from PIL import Image
 from pydantic import ValidationError
 
+from app.ocr import ocr_image_file, ocr_pdf_pages
 from app.prompt import SYSTEM_PROMPT, USER_PROMPT_FOR_VISION, user_prompt_for_text
 from app.schema import ExtractionResponse, Invoice
 
@@ -57,11 +58,7 @@ class ExtractionError(Exception):
 class ExtractorConfig:
     base_url: str = "http://localhost:1234/v1"
     api_key: str = "lm-studio"
-    # Text model — used for PDFs with a readable text layer.
     model: str = "local-model"
-    # Vision model — used for scanned PDFs and image uploads.
-    # Set to the same value as `model` if your vision model handles text too.
-    vision_model: str = "local-model"
     temperature: float = 0.1
     timeout_seconds: float = 300.0
 
@@ -118,14 +115,14 @@ class InvoiceExtractor:
 
             logger.info("PDF has no text layer; using vision path: %s", original_filename)
             pages = self._rasterize_pdf(file_path, warnings)
-            invoice = self._extract_from_images(pages)
-            return self._response(original_filename, "vision", invoice, warnings)
+            invoice, method = self._extract_from_images(pages, warnings)
+            return self._response(original_filename, method, invoice, warnings)
 
         if suffix in IMAGE_SUFFIXES:
             logger.info("Image upload; using vision path: %s", original_filename)
             img = Image.open(file_path)
-            invoice = self._extract_from_images([img])
-            return self._response(original_filename, "vision", invoice, warnings)
+            invoice, method = self._extract_from_images([img], warnings)
+            return self._response(original_filename, method, invoice, warnings)
 
         raise ExtractionError(f"Unsupported file type: {suffix or '(none)'}")
 
@@ -156,7 +153,9 @@ class InvoiceExtractor:
             pages = pages[:MAX_VISION_PAGES]
         return pages
 
-    def _extract_from_images(self, pages: list[Image.Image]) -> Invoice:
+    def _extract_from_images(
+        self, pages: list[Image.Image], warnings: list[str]
+    ) -> tuple[Invoice, Literal["vision", "ocr"]]:
         content: list[dict[str, Any]] = []
         for page in pages:
             resized = self._resize_for_vision(page)
@@ -171,7 +170,7 @@ class InvoiceExtractor:
 
         try:
             response = self._client.chat.completions.create(
-                model=self._config.vision_model,
+                model=self._config.model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
@@ -179,6 +178,22 @@ class InvoiceExtractor:
                 response_format=RESPONSE_FORMAT,
                 temperature=self._config.temperature,
             )
+            raw = response.choices[0].message.content or ""
+            return self._parse(raw.strip()), "vision"
+        except BadRequestError as exc:
+            if "does not support images" in str(exc).lower() or "image" in str(exc).lower():
+                logger.warning(
+                    "Vision model '%s' does not support images; falling back to OCR. "
+                    "Load a vision-capable model (e.g. Qwen2-VL, LLaVA) and set "
+                    "VISION_MODEL to use the direct vision path.",
+                    self._config.model,
+                )
+                warnings.append(
+                    f"Vision model '{self._config.model}' does not support images. "
+                    "Fell back to Tesseract OCR — load a vision-capable model for better accuracy."
+                )
+                return self._ocr_fallback(pages), "ocr"
+            raise ExtractionError(f"LLM server rejected the request: {exc}") from exc
         except APIConnectionError as exc:
             raise ExtractionError(
                 f"Could not reach the LLM server at {self._config.base_url}. "
@@ -186,8 +201,13 @@ class InvoiceExtractor:
                 f"Original error: {exc}"
             ) from exc
 
-        raw = response.choices[0].message.content or ""
-        return self._parse(raw.strip())
+    def _ocr_fallback(self, pages: list[Image.Image]) -> Invoice:
+        text = ocr_pdf_pages(pages)
+        if not text.strip():
+            raise ExtractionError(
+                "OCR produced no text. The image may be too blurry or contain no readable invoice."
+            )
+        return self._extract_from_text(text)
 
     @staticmethod
     def _resize_for_vision(img: Image.Image) -> Image.Image:
