@@ -1,15 +1,19 @@
-"""Invoice extractor — local LLM (text path) + Claude Vision (image path).
+"""Invoice extractor — local LLM via LM Studio (OpenAI-compatible API).
 
-Three paths, converging on structured JSON extraction:
+Three paths, all using the same LM Studio server:
 
-  PDF with text layer  → pdfplumber → text → local LLM
-  PDF without text     → pdf2image  → pages as images → Claude Vision
-  Image upload         → Claude Vision directly
+  PDF with text layer  → pdfplumber → text → LLM (text model)
+  PDF without text     → pdf2image  → pages as images → LLM (vision model)
+  Image upload         → LLM (vision model) directly
 
-The text path uses LM Studio's OpenAI-compatible server with JSON Schema
-constrained output. The vision path sends base64-encoded images directly
-to Claude, bypassing Tesseract entirely — this eliminates Greek OCR errors
-and works on any language without installing extra Tesseract language packs.
+Both paths use LM Studio's OpenAI-compatible API. Load a text model for
+the text path and a vision model for the image path. If you load a single
+vision model that also handles text well (e.g. Qwen2-VL, Phi-3-Vision),
+you can point both paths at the same model with EXTRACTION_MODEL and
+VISION_MODEL set to the same value.
+
+Vision requests use the `image_url` content block with a base64 data URL,
+which LM Studio supports for any loaded vision model.
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import anthropic
 import pdfplumber
 from openai import APIConnectionError, OpenAI
 from pdf2image import convert_from_path
@@ -41,8 +44,8 @@ MAX_VISION_PAGES = 10
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
 
-# Max dimension for images sent to Claude. Larger images cost more tokens
-# without meaningful accuracy gains on invoice text.
+# Max dimension for images sent to the vision model. Keeps token usage
+# reasonable while preserving enough resolution for invoice text.
 VISION_MAX_DIMENSION = 2000
 
 
@@ -54,12 +57,13 @@ class ExtractionError(Exception):
 class ExtractorConfig:
     base_url: str = "http://localhost:1234/v1"
     api_key: str = "lm-studio"
+    # Text model — used for PDFs with a readable text layer.
     model: str = "local-model"
+    # Vision model — used for scanned PDFs and image uploads.
+    # Set to the same value as `model` if your vision model handles text too.
+    vision_model: str = "local-model"
     temperature: float = 0.1
     timeout_seconds: float = 300.0
-    # Claude Vision config — required for scanned PDFs and image uploads.
-    anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-7"
 
 
 def _build_response_schema() -> dict[str, Any]:
@@ -97,11 +101,6 @@ class InvoiceExtractor:
             api_key=config.api_key,
             timeout=config.timeout_seconds,
             max_retries=0,
-        )
-        self._claude: anthropic.Anthropic | None = (
-            anthropic.Anthropic(api_key=config.anthropic_api_key)
-            if config.anthropic_api_key
-            else None
         )
 
     # -------------------------------------------------------------- public API
@@ -158,33 +157,37 @@ class InvoiceExtractor:
         return pages
 
     def _extract_from_images(self, pages: list[Image.Image]) -> Invoice:
-        if not self._claude:
-            raise ExtractionError(
-                "Claude Vision is required for scanned PDFs and image uploads, "
-                "but ANTHROPIC_API_KEY is not configured. Set it in your environment."
-            )
-
-        image_blocks: list[dict[str, Any]] = []
+        content: list[dict[str, Any]] = []
         for page in pages:
             resized = self._resize_for_vision(page)
             buf = io.BytesIO()
             resized.convert("RGB").save(buf, format="JPEG", quality=90)
             b64 = base64.standard_b64encode(buf.getvalue()).decode()
-            image_blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
             })
+        content.append({"type": "text", "text": USER_PROMPT_FOR_VISION})
 
-        image_blocks.append({"type": "text", "text": USER_PROMPT_FOR_VISION})
+        try:
+            response = self._client.chat.completions.create(
+                model=self._config.vision_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": content},
+                ],
+                response_format=RESPONSE_FORMAT,
+                temperature=self._config.temperature,
+            )
+        except APIConnectionError as exc:
+            raise ExtractionError(
+                f"Could not reach the LLM server at {self._config.base_url}. "
+                f"Check that LM Studio is running and a vision model is loaded. "
+                f"Original error: {exc}"
+            ) from exc
 
-        response = self._claude.messages.create(
-            model=self._config.claude_model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": image_blocks}],
-        )
-        raw = response.content[0].text.strip() if response.content else ""
-        return self._parse(raw)
+        raw = response.choices[0].message.content or ""
+        return self._parse(raw.strip())
 
     @staticmethod
     def _resize_for_vision(img: Image.Image) -> Image.Image:
