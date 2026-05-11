@@ -53,12 +53,12 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
           <FileText className="h-5 w-5" />
           <h1 className="font-semibold">Invoice Reader</h1>
           <span className="text-sm text-muted-foreground">
-            {readyCount} of {entries.length} ready
+            {readyCount} από {entries.length} έτοιμα
           </span>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={onReset}>
-            <RotateCcw className="h-4 w-4" /> Start over
+            <RotateCcw className="h-4 w-4" /> Νέα αναζήτηση
           </Button>
           <Button onClick={handleSubmit} disabled={!allReady || submitting}>
             {submitting ? (
@@ -66,7 +66,7 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
             ) : (
               <Send className="h-4 w-4" />
             )}
-            Submit {readyCount > 0 && `(${readyCount})`}
+            Υποβολή {readyCount > 0 && `(${readyCount})`}
           </Button>
         </div>
       </header>
@@ -90,8 +90,7 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
                     {e.status === "ready" && e.invoice?.invoice_number && (
                       <span className="block text-xs text-muted-foreground truncate">
                         {e.invoice.invoice_number}
-                        {e.invoice.grand_total != null &&
-                          ` · ${e.invoice.grand_total} ${e.invoice.currency ?? ""}`}
+                        {e.invoice.total_price != null && ` · ${e.invoice.total_price} €`}
                       </span>
                     )}
                     {e.status === "error" && (
@@ -128,7 +127,7 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
               )}
               {active.extractionMethod === "ocr" && (
                 <p className="mb-4 text-xs text-muted-foreground">
-                  Extracted via OCR (Tesseract → text LLM). Verify carefully — OCR is more error-prone than direct text extraction.
+                  Εξαγωγή μέσω OCR (Tesseract). Επαληθεύστε προσεκτικά — το OCR είναι πιο επιρρεπές σε σφάλματα.
                 </p>
               )}
               <InvoiceForm
@@ -139,12 +138,12 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
           ) : active?.status === "extracting" ? (
             <Centered>
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              <p className="text-sm text-muted-foreground mt-2">Extracting…</p>
+              <p className="text-sm text-muted-foreground mt-2">Εξαγωγή δεδομένων…</p>
             </Centered>
           ) : active?.status === "error" ? (
             <Centered>
               <AlertCircle className="h-6 w-6 text-destructive" />
-              <p className="text-sm font-medium mt-2">Extraction failed</p>
+              <p className="text-sm font-medium mt-2">Αποτυχία εξαγωγής</p>
               <p className="text-xs text-muted-foreground mt-1 max-w-sm text-center">
                 {active.errorMessage}
               </p>
@@ -174,7 +173,7 @@ function Centered({ children }: { children: React.ReactNode }) {
 function Empty() {
   return (
     <Centered>
-      <p className="text-sm text-muted-foreground">Select a file from the sidebar</p>
+      <p className="text-sm text-muted-foreground">Επιλέξτε αρχείο από την αριστερή λίστα</p>
     </Centered>
   );
 }
