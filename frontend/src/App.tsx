@@ -40,7 +40,7 @@ export default function App() {
             return {
               ...entry,
               status: "error",
-              errorMessage: "No response slot returned for this file.",
+              errorMessage: "Δεν επιστράφηκε αποτέλεσμα για αυτό το αρχείο.",
             };
           }
           // The backend returns warnings instead of throwing for per-file failures
@@ -94,15 +94,15 @@ export default function App() {
             <div className="flex items-center gap-3">
               <FileText className="h-6 w-6" />
               <div>
-                <h1 className="text-xl font-semibold tracking-tight">Invoice Reader</h1>
+                <h1 className="text-xl font-semibold tracking-tight">Ανάγνωση Τιμολογίων</h1>
                 <p className="text-sm text-muted-foreground">
-                  Upload invoices, review the extracted data, then submit.
+                  Ανεβάστε τιμολόγια, ελέγξτε τα εξαχθέντα δεδομένα και υποβάλετε.
                 </p>
               </div>
             </div>
             <UploadZone onFiles={startExtraction} />
             {error && (
-              <p className="text-sm text-destructive">Error: {error}</p>
+              <p className="text-sm text-destructive">Σφάλμα: {error}</p>
             )}
           </div>
         </div>

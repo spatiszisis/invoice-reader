@@ -51,7 +51,7 @@ export function InvoiceReview({ entries, onUpdate, onReset }: Props) {
       <header className="border-b px-6 py-3 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <FileText className="h-5 w-5" />
-          <h1 className="font-semibold">Invoice Reader</h1>
+          <h1 className="font-semibold">Ανάγνωση Τιμολογίων</h1>
           <span className="text-sm text-muted-foreground">
             {readyCount} από {entries.length} έτοιμα
           </span>

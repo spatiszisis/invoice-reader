@@ -47,8 +47,8 @@ export function PdfViewer({ fileUrl, filename }: Props) {
           <Document
             file={fileUrl}
             onLoadSuccess={(d) => setNumPages(d.numPages)}
-            loading={<div className="text-sm text-muted-foreground">Loading PDF…</div>}
-            error={<div className="text-sm text-destructive">Failed to load PDF</div>}
+            loading={<div className="text-sm text-muted-foreground">Φόρτωση PDF…</div>}
+            error={<div className="text-sm text-destructive">Αποτυχία φόρτωσης PDF</div>}
           >
             <Page
               pageNumber={page}
@@ -71,7 +71,7 @@ export function PdfViewer({ fileUrl, filename }: Props) {
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <span className="text-xs text-muted-foreground">
-            Page {page} of {numPages}
+            Σελίδα {page} από {numPages}
           </span>
           <Button
             size="sm"

@@ -17,7 +17,7 @@ export function UploadZone({ onFiles, disabled }: Props) {
         .filter((r) => r.errors.some((e) => e.code === "file-too-large"))
         .map((r) => r.file.name);
       if (tooBig.length) {
-        alert(`Files exceeding 10 MB were skipped:\n${tooBig.join("\n")}`);
+        alert(`Τα παρακάτω αρχεία υπερβαίνουν τα 10 MB και παραλείφθηκαν:\n${tooBig.join("\n")}`);
       }
       if (accepted.length) onFiles(accepted);
     },
@@ -58,10 +58,10 @@ export function UploadZone({ onFiles, disabled }: Props) {
         )}
         <div>
           <p className="font-medium">
-            {isDragActive ? "Drop the files here" : "Drag invoices here, or click to select"}
+            {isDragActive ? "Αφήστε τα αρχεία εδώ" : "Σύρετε τιμολόγια εδώ ή κάντε κλικ για επιλογή"}
           </p>
           <p className="text-sm text-muted-foreground mt-1">
-            PDFs and photos (PNG, JPG, TIFF, WEBP, BMP) — up to 10 MB each
+            PDF και φωτογραφίες (PNG, JPG, TIFF, WEBP, BMP) — έως 10 MB το καθένα
           </p>
         </div>
       </div>
